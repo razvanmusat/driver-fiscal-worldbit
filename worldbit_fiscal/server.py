@@ -8,20 +8,23 @@ Apărări (fără certificat, cum s-a hotărât):
 """
 import json
 import logging
+import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs
 
-from . import auth, config as config_mod, drawer, setari
+from . import auth, config as config_mod, drawer, ports, setari, updater
 from .contract import InvalidPayload
 from .drivers import DRIVERS, build_driver, driver_settings
+from .pos.base import build_pos
 from .runner import public_job
+from .version import __version__
 
 log = logging.getLogger("worldbit_fiscal")
 
 MAX_BODY = 1_000_000
-_JOB_PATH = re.compile(r"^/jobs/([A-Za-z0-9._-]{1,64})(/retry)?$")
+_JOB_PATH = re.compile(r"^/jobs/([A-Za-z0-9._-]{1,64})(/retry|/pos-void)?$")
 
 
 class App:
@@ -31,7 +34,7 @@ class App:
         self.cfg = cfg
         self.runner = runner
         self.home = home
-        self.sessions = auth.Sessions()
+        self.sessions = auth.Sessions(os.path.join(home, "sessions.json") if home else None)
         self.throttle = auth.LoginThrottle()
 
 
@@ -124,10 +127,13 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and origin in self.app.cfg["allowed_origins"]:
             self.send_response(204)
+            extra = {}
+            if self.headers.get("Access-Control-Request-Private-Network", "").lower() == "true":
+                extra["Access-Control-Allow-Private-Network"] = "true"   # Chrome o cere când un site public apelează un agent local (Private/Local Network Access)
             for k, v in {**self._cors_headers(),
                          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
                          "Access-Control-Allow-Headers": "Content-Type",
-                         "Access-Control-Max-Age": "600"}.items():
+                         "Access-Control-Max-Age": "600", **extra}.items():
                 self.send_header(k, v)
             self.send_header("Content-Length", "0")
             self.send_header("Connection", "close")
@@ -175,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
                 row, created = runner.submit_report(data.get("external_id"), data.get("type"))
                 return self._json(202 if created else 200, public_job(row, runner.fiscal.name, self.app.cfg.get("agent_id")))
             match = _JOB_PATH.match(path)
+            if match and match.group(2) == "/pos-void":
+                return self._pos_void(match.group(1))
             if match and match.group(2):
                 data = json.loads(body) if body.strip() else {}
                 row, problem = runner.retry(match.group(1), bool(data.get("confirm_not_printed")))
@@ -192,11 +200,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "INVALID_PAYLOAD", "JSON invalid")
         self._error(404, "NOT_FOUND", "Cale necunoscută")
 
+    def _pos_void(self, external_id):
+        """Anulează la POS plata aprobată a unui bon care n-a ieșit (vezi Runner.void_pos)."""
+        runner = self.app.runner
+        row, problem, eroare = runner.void_pos(external_id)
+        if problem is None:
+            return self._json(200, public_job(row, runner.fiscal.name, self.app.cfg.get("agent_id")))
+        if problem == "NOT_FOUND":
+            return self._error(404, "NOT_FOUND", "Job necunoscut")
+        if problem == "NOT_VOIDABLE":
+            return self._error(409, "NOT_VOIDABLE", "Plata nu poate fi anulată: bonul a ieșit sau plata nu e aprobată la POS")
+        if problem == "BUSY":
+            return self._error(409, "BUSY", "O operațiune fiscală e în curs; încearcă din nou")
+        nr = ((row or {}).get("pos") or {}).get("transaction_id")
+        sufix = f" Anulează chitanța nr. {nr} direct de pe POS." if nr else ""
+        return self._error(502, eroare.code, f"{eroare}{sufix}")
+
     def _health(self):
         runner = self.app.runner
         health = runner.fiscal.health()
         self._json(200, {
             "ok": True,
+            "version": __version__,
             "agent_id": self.app.cfg.get("agent_id"),
             "driver": runner.fiscal.name,
             "fiscal": {"ready": health.ready, "detail": health.detail},
@@ -216,13 +241,21 @@ class Handler(BaseHTTPRequestHandler):
     def _settings_html(self, **kw):
         cfg = self.app.cfg
         cls = DRIVERS[cfg["driver"]]
-        return setari.settings_page(cfg, cls, driver_settings(cfg, cfg["driver"]), **kw)
+        return setari.settings_page(cfg, cls, driver_settings(cfg, cfg["driver"]),
+                                    last_update=updater.last_log(self.app.home or config_mod.home_dir()), **kw)
 
     def _setari_get(self, path):
         if not self._guard(True):
             return
-        if path != "/setari":
+        if path not in ("/setari", "/setari/ports", "/setari/update-status"):
             return self._error(404, "NOT_FOUND", "Cale necunoscută")
+        if path in ("/setari/ports", "/setari/update-status"):
+            if not self._authed():
+                return self._error(401, "UNAUTHORIZED", "Autentificare necesară")
+            if path == "/setari/ports":
+                return self._json(200, {"ports": ports.list_ports()})
+            home = self.app.home or config_mod.home_dir()
+            return self._json(200, {"result": updater.update_result(home), "log": updater.last_log(home)})
         if not self._authed():
             return self._html(200, setari.login_page(configured=bool(self.app.cfg["admin"])))
         self._html(200, self._settings_html())
@@ -265,6 +298,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 new_cfg = setari.parse_settings_form(form, app.cfg, DRIVERS[app.cfg["driver"]])
                 build_driver(new_cfg)   # validează înainte de salvare
+                build_pos(new_cfg)
             except ValueError as e:
                 return self._html(400, self._settings_html(error=str(e)))
             config_mod.save(new_cfg, app.home)
@@ -282,6 +316,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/setari/drawer-test":
             ok, cod, mesaj = drawer.open_drawer(app.cfg)
             return self._html(200, self._settings_html(output="Sertarul s-a deschis." if ok else f"Sertarul NU s-a deschis: {mesaj}"))
+
+        if path == "/setari/update":
+            info = updater.run_update_info(app.cfg, app.runner, app.home or config_mod.home_dir())
+            if "application/json" in (self.headers.get("Accept") or ""):
+                return self._json(200, info)                  # fereastra de progres din pagină
+            return self._html(200, self._settings_html(output=info["message"]))
+
+        if path == "/setari/pos-test":
+            pos = app.runner.pos
+            check = getattr(pos, "check_port", None)
+            text = "POS-ul nu e configurat (model: none)." if pos is None else (check() if check else "Modelul POS nu are verificare de port.")
+            return self._html(200, self._settings_html(output=text))
 
         if path == "/setari/devices":
             discover = getattr(app.runner.fiscal, "discover", None)

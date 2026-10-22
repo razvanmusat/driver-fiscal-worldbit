@@ -48,6 +48,9 @@ class FiscalResult:
 class FiscalDriver(ABC):
     name = ""
     fields = ()
+    files = ()   # fișierele driverului din pachet, relative la worldbit_fiscal/ (verificarea de actualizare din /setari)
+    # Driverul recunoaște o cheie deja executată (idempotență): o încercare rămasă fără răspuns se reia cu aceeași cheie.
+    same_key_after_unknown = False
 
     def __init__(self, settings):
         self.settings = settings

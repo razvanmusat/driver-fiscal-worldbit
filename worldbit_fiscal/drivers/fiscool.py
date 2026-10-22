@@ -16,9 +16,13 @@ Clasificarea erorilor (din pagina „Coduri Eroare” -> „Bune practici”):
   - orice altceva (hardware 500-519, 1000-1003, 1011 etc.): documentația nu garantează că nu s-a tipărit ->
     eșec cu `retry_safe=False`, reîncercarea cere confirmarea operatorului.
 
+VERIFICAT pe FisCool real (casă simulată): FisCool memorează și ERORILE pe cheie („Lipsă hârtie", apoi hârtie pusă: aceeași cheie
+întoarce aceeași eroare). De aceea după un răspuns de eroare reluarea folosește cheie nouă (`<id>-N`), iar o încercare rămasă FĂRĂ
+răspuns (răspuns pierdut, termen depășit, agent repornit) se reia cu ACEEAȘI cheie: dacă bonul a ieșit totuși, FisCool îl recunoaște.
+Cheile se țin doar în memoria FisCool (după repornirea lui aceeași cheie se execută din nou).
+
 NEVERIFICAT (documentația nu spune; de confirmat pe un aparat real în perioada de test):
-  - dacă FisCool memorează și ERORILE pe cheia de idempotență (dacă da, o reîncercare pe aceeași cheie după o eroare
-    tranzitorie întoarce aceeași eroare; atunci operatorul reîncearcă cu confirmare, pe cheie nouă);
+  - dacă și erorile 408/605/606/1005 se memorează pe cheie (nu s-a putut provoca pe simulator);
   - POS: dacă la dispozitiv e activ `auto_send_card_to_pos`, FisCool trimite singur suma cardului către POS-ul asociat
     înaintea bonului (documentat). Răspunsul bonului NU conține RRN/cod autorizare.
 """
@@ -47,6 +51,8 @@ def _s(value):
 
 class FiscoolDriver(FiscalDriver):
     name = "fiscool"
+    files = ("drivers/fiscool.py", "drivers/catalog_fiscool.py")
+    same_key_after_unknown = True
     fields = (
         Field("base_url", "Adresa FisCool API", "text", "http://127.0.0.1:10123"),
         Field("device_id", "ID dispozitiv fiscal (UUID)", "text", "",

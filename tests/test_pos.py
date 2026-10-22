@@ -70,15 +70,15 @@ class PosFlowTest(unittest.TestCase):
         self.assertEqual(row["status"], "printed", row)
         self.assertEqual(FakePos.calls, ["100.00"])                # POS apelat o singură dată
 
-    def test_uncertain_payment_never_re_requested(self):
+    def test_a_payment_without_a_result_is_never_re_requested_and_becomes_a_failure_the_cashier_can_retry(self):
         FakePos.behaviour = "uncertain"
         self.runner.submit_receipt(receipt_json(card=100))
         wait_status(self.runner, "r1", ("uncertain",))
         for _ in range(3):
             row = resolve_now(self.runner, "r1")
-            self.assertEqual(row["status"], "uncertain")
-        self.assertEqual(FakePos.calls, ["100.00"])
-        self.assertEqual(self.fisco.posts, [])
+            self.assertEqual((row["status"], row["error"]["code"], row["error"]["retry_safe"]), ("failed", "POS_NO_RESULT", True))
+        self.assertEqual(FakePos.calls, ["100.00"])                # POS-ul nu e cerut a doua oară singur
+        self.assertEqual(self.fisco.posts, [])                     # și nu se tipărește nimic
 
     def test_no_pos_configured_marks_card_as_skipped(self):
         runner = make_runner(fisco_cfg(self.fisco.url))

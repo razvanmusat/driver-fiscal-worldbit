@@ -5,10 +5,12 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
 import uuid
 
 from . import auth, config as config_mod
 from .drivers import DRIVERS
+from .pos.base import POS_DRIVERS
 from .runner import Runner
 from .server import App, make_server
 from .state import Store
@@ -21,6 +23,31 @@ def _setup_logging(home):
     if sys.stdout is not None:
         handlers.append(logging.StreamHandler(sys.stdout))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=handlers)
+
+
+PURGE_LA_ORE = 6
+
+
+def _porneste_curatarea(cfg, store):
+    """Șterge joburile terminate mai vechi de `retention_days` la pornire și apoi la fiecare 6 ore."""
+    try:
+        zile = max(1, int(cfg.get("retention_days") or 7))   # minim o zi: o valoare negativă ar șterge toate joburile terminate
+    except (TypeError, ValueError):
+        zile = 7
+    log = logging.getLogger("worldbit_fiscal")
+
+    def curata():
+        try:
+            n = store.purge(zile * 86400)
+            if n:
+                log.info("curățare: %s joburi terminate mai vechi de %s zile șterse din baza agentului", n, zile)
+        except Exception:
+            log.exception("curățarea joburilor vechi a eșuat")
+        timer = threading.Timer(PURGE_LA_ORE * 3600, curata)
+        timer.daemon = True
+        timer.start()
+
+    curata()
 
 
 def cmd_run(args):
@@ -36,6 +63,7 @@ def cmd_run(args):
     store = Store(os.path.join(home, "jobs.sqlite3"))
     runner = Runner(cfg, store)
     runner.recover()
+    _porneste_curatarea(cfg, store)
     app = App(cfg, runner, home)
     server = make_server(app)
     logging.getLogger("worldbit_fiscal").info(
@@ -53,6 +81,8 @@ def cmd_init(args):
     cfg = config_mod.load(home)
     cfg["driver"] = args.driver
     cfg["port"] = args.port
+    if args.pos is not None and args.pos != (cfg.get("pos") or {}).get("model"):   # o reinstalare cu același POS nu șterge setările lui
+        cfg["pos"] = {"model": args.pos, "settings": {}}
     if args.origin:
         cfg["allowed_origins"] = list(args.origin)
     password = os.environ.get("WORLDBIT_ADMIN_PASSWORD") or getpass.getpass("Parola de admin pentru /setari: ")
@@ -93,12 +123,16 @@ def cmd_chrome_policy(args):
 
 
 def main(argv=None):
+    for flux in (sys.stdout, sys.stderr):
+        if flux is not None and hasattr(flux, "reconfigure"):
+            flux.reconfigure(errors="replace")   # ieșirea redirecționată (script, instalator) poate fi cp1252: un „ț” nu mai oprește programul
     parser = argparse.ArgumentParser(prog="worldbit_fiscal")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="pornește agentul")
     init = sub.add_parser("init", help="alege driverul și setează parola de admin (la instalare)")
     init.add_argument("--driver", choices=sorted(DRIVERS), required=True)
     init.add_argument("--port", type=int, default=config_mod.DEFAULT_PORT)
+    init.add_argument("--pos", choices=["none"] + sorted(POS_DRIVERS), help="modelul de POS (setările lui se completează în /setari)")
     init.add_argument("--origin", action="append", help="originea aplicației web permise (repetabil)")
     politica = sub.add_parser("chrome-policy", help="pre-aprobă originea aplicației în Chrome și Edge (Windows, administrator)")
     politica.add_argument("actiune", choices=["add", "remove", "status"])

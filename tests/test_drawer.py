@@ -96,7 +96,11 @@ class DeschidereAutomataTest(unittest.TestCase):
 
     def tipareste(self, runner, **kw):
         runner.submit_receipt(receipt_json(**kw))
-        return wait_status(runner, "r1", ("printed",))
+        row = wait_status(runner, "r1", ("printed",))
+        # „tipărit" se scrie înainte ca firul jobului să termine deschiderea sertarului; firul ține lacătul agentului până la capăt
+        with runner.send_lock:
+            pass
+        return runner.store.get("r1") or row
 
     def test_numerar_deschide_sertarul_dupa_tiparire(self):
         runner = self.runner()

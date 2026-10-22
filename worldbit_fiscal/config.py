@@ -23,6 +23,11 @@ DEFAULTS = {
     "max_wait_s": 30,
     "max_wait_report_s": 120,
     "admin": None,
+    # joburile terminate mai vechi de atâtea zile se șterg din baza agentului (Dressbit își păstrează istoricul; agentul ține doar ce îi trebuie ca să
+    # recunoască o plată reluată). Joburile în lucru sau incerte nu se șterg niciodată.
+    "retention_days": 7,
+    # de unde se descarcă actualizarea (implicit ultima versiune din repo-ul public de pe GitHub); se schimbă doar în config.json
+    "update_url": None,
 }
 
 

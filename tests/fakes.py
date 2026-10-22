@@ -154,8 +154,9 @@ class FakeFisco(_Server):
 
 
 class FakeFiscool(_Server):
-    """Forma răspunsurilor urmează documentația FisCool (api-http, operatiuni). Erorile NU se memorează pe cheie
-    (comportament nedocumentat) — doar succesul e idempotent, ca în documentație."""
+    """Forma răspunsurilor urmează documentația FisCool (api-http, operatiuni). Succesul se memorează pe cheie (documentat); erorile
+    tot, cu excepția celor documentate ca reîncercabile pe aceeași cheie (408, 605, 606, 1005). Verificat pe FisCool real (casă
+    simulată) doar pentru eroarea 500 „Lipsă hârtie": aceeași cheie întoarce aceeași eroare chiar cu hârtia pusă. Pentru 408 etc. nu s-a putut verifica."""
     DEVICE = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
     SERIAL = "DT123456"
 
@@ -167,14 +168,16 @@ class FakeFiscool(_Server):
         self.device_listed = True
         self.requests = []            # (Idempotency-Key, corp)
         self.cache = {}
+        self.error_cache = {}
         self.executed = 0
+        self.slip_base = 1233         # primul bon are numărul slip_base + 1; două case false în aceeași bază de date au nevoie de numerotări diferite
 
     def state(self):
         return {"executed": self.executed, "requests": [[k, b] for k, b in self.requests], "mode": self.mode,
                 "device_status": self.device_status, "error": list(self.error) if self.error else None}
 
     def control(self, body):
-        for key in ("mode", "device_status", "device_listed", "error_times"):
+        for key in ("mode", "device_status", "device_listed", "error_times", "slip_base"):
             if key in body:
                 setattr(self, key, body[key])
         if "error" in body:
@@ -195,6 +198,8 @@ class FakeFiscool(_Server):
             self.requests.append((key, body))
             if key in self.cache:
                 return self.reply(h, 200, self.cache[key])
+            if key in self.error_cache:
+                return self.reply(h, *self.error_cache[key])
             if self.error:
                 if self.error_times is not None:
                     self.error_times -= 1
@@ -204,11 +209,13 @@ class FakeFiscool(_Server):
                 corp = {"status": code, "error": message}
                 if rest:
                     corp["receipt"] = rest[0]   # chitanța de refuz POS (câmp opțional documentat)
+                if code not in (408, 605, 606, 1005):
+                    self.error_cache[key] = (http, corp)
                 return self.reply(h, http, corp)
             self.executed += 1
             kind = body["operation"]["type"]
             if kind == "print_receipt":
-                obj = {"status": 0, "msg": "Receipt printed", "slip_number": 1233 + self.executed, "z_report_number": 45,
+                obj = {"status": 0, "msg": "Receipt printed", "slip_number": self.slip_base + self.executed, "z_report_number": 45,
                        "fiscal_receipt_count": 1050, "bon_id": None}
             else:
                 obj = {"status": 0, "msg": "Report printed", "report_number": 46, "grand_total_sell": 12345,

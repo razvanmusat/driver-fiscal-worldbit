@@ -1,0 +1,10 @@
+{
+  "casa": [
+    {"id": "fiscool", "eticheta": "FisCool", "link": "https://fiscool.ro/", "nota": "Pe pagină: „Descarcă pentru Windows”. Are 14 zile de probă; licența se activează în FisCool."},
+    {"id": "fisco", "eticheta": "Fisco", "link": "https://fisco.ro/manual-fisco/", "nota": "Instalează driverul Fisco după manualul producătorului."}
+  ],
+  "pos": [
+    {"id": "none", "eticheta": "Fără POS (plata cu cardul se face separat, pe terminal)"},
+    {"id": "hypercom_ecr", "eticheta": "Raiffeisen / Newland N910 Pro (USB)", "link": "https://aimsolutionserv.ro/pkmervRTOL/newland_USB_Driver.rar", "nota": "Arhiva .rar cu driverul USB al terminalului; dezarhivează-o și rulează programul de instalare."}
+  ]
+}

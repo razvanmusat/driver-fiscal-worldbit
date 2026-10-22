@@ -3,15 +3,18 @@
   Instalează agentul "driver fiscal worldbit" pe un PC cu casă de marcat și pre-aprobă permanent aplicația în Chrome.
 
 .EXAMPLE
-  .\install.ps1 -Driver fisco -Origin https://test.worldbit.ro
-  .\install.ps1 -Driver fiscool -Origin https://test.worldbit.ro -Port 4747
+  .\install.ps1 -Origin https://test.worldbit.ro                              (te întreabă casa de marcat și POS-ul)
+  .\install.ps1 -Driver fiscool -Pos none -Origin https://test.worldbit.ro -Port 4747   (fără întrebări)
+
+  Driverele casei și ale POS-ului NU se descarcă singure: instalatorul arată linkul oficial (din drivere.json), tu le instalezi, apoi răspunzi „D”.
 
   Rulează ca administrator (se re-lansează singur ridicat). Parola paginii /setari se cere la instalare.
   VERIFICAT pe Windows 11 (VM): instalare curată (inclusiv Python), pornire automată la boot ca task SYSTEM, repornire PC, dezinstalare.
   NEVERIFICAT: efectul politicii Chrome (promptul de acces la rețeaua locală) și driverul Fisco; test pe PC-ul real de casă.
 #>
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('fisco', 'fiscool')][string]$Driver,
+    [ValidateSet('fisco', 'fiscool')][string]$Driver,
+    [ValidateSet('none', 'hypercom_ecr')][string]$Pos,
     [Parameter(Mandatory = $true)][ValidatePattern('^https?://[A-Za-z0-9.\-]+(:\d{1,5})?$')][string]$Origin,
     [int]$Port = 4747,
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'WorldbitFiscalDriver'),
@@ -25,9 +28,47 @@ $Sursa = Split-Path -Parent $PSScriptRoot
 # --- administrator
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $args2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Driver', $Driver, '-Origin', $Origin, '-Port', $Port, '-InstallDir', "`"$InstallDir`"")
+    $args2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Origin', $Origin, '-Port', $Port, '-InstallDir', "`"$InstallDir`"")
+    if ($Driver) { $args2 += @('-Driver', $Driver) }
+    if ($Pos) { $args2 += @('-Pos', $Pos) }
     Start-Process powershell -Verb RunAs -ArgumentList $args2 -Wait
     exit
+}
+
+# --- casa de marcat și POS: alegerea + „ai instalat driverul?” (fără verificare automată; linkurile sunt în drivere.json, ca să se poată schimba fără cod)
+$drivere = Get-Content (Join-Path $PSScriptRoot 'drivere.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+function Alege($titlu, $optiuni) {
+    Write-Host ''
+    Write-Host $titlu
+    for ($i = 0; $i -lt $optiuni.Count; $i++) { Write-Host "  $($i + 1). $($optiuni[$i].eticheta)" }
+    while ($true) {
+        $r = Read-Host 'Alegerea ta (număr)'
+        $n = 0
+        if ([int]::TryParse($r, [ref]$n) -and $n -ge 1 -and $n -le $optiuni.Count) { return $optiuni[$n - 1] }
+    }
+}
+function Confirma-Driver($element) {
+    if (-not $element.link) { return }
+    Write-Host ''
+    Write-Host "Driver: $($element.eticheta)"
+    Write-Host "Link oficial: $($element.link)"
+    if ($element.nota) { Write-Host $element.nota }
+    while ($true) {
+        $r = Read-Host "Ai descărcat și instalat driverul $($element.eticheta)? (D/N)"
+        if ($r -match '^[dDyY]') { return }
+        try { Start-Process $element.link } catch { }
+        Write-Host 'Instalează-l de la linkul de mai sus (s-a deschis în browser), apoi răspunde D.'
+    }
+}
+if (-not $Driver) {
+    $alesCasa = Alege 'Ce casă de marcat ai?' $drivere.casa
+    $Driver = $alesCasa.id
+    Confirma-Driver $alesCasa
+}
+if (-not $Pos) {
+    $alesPos = Alege 'Ce POS bancar folosești cu agentul?' $drivere.pos
+    $Pos = $alesPos.id
+    Confirma-Driver $alesPos
 }
 
 # --- Python (pentru toți utilizatorii, ca să poată rula și contul SYSTEM)
@@ -78,6 +119,7 @@ New-Item -ItemType Directory -Force $date | Out-Null
 icacls $date /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 
 # --- configurare inițială (agent_id, parola /setari, driverul, originea)
+if (-not $AdminPassword -and $env:WORLDBIT_ADMIN_PASSWORD) { $AdminPassword = ConvertTo-SecureString $env:WORLDBIT_ADMIN_PASSWORD -AsPlainText -Force }
 if (-not $AdminPassword) { $AdminPassword = Read-Host 'Parola pentru pagina /setari (minim 8 caractere)' -AsSecureString }
 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPassword)
 try {
@@ -85,7 +127,7 @@ try {
     $env:WORLDBIT_FISCAL_HOME = $date
     # -E -s (nu -I): modul izolat ignoră și directorul curent, deci `-m worldbit_fiscal` nu ar găsi pachetul din $InstallDir (scris doar de administratori)
     Push-Location $InstallDir
-    & $python -E -s -m worldbit_fiscal init --driver $Driver --port $Port --origin $Origin
+    & $python -E -s -m worldbit_fiscal init --driver $Driver --pos $Pos --port $Port --origin $Origin
     if ($LASTEXITCODE -ne 0) { throw 'init a eșuat.' }
     # Chrome: aplicația are voie permanent să vorbească cu agentul (fără promptul „Access other apps and services on this device")
     & $python -E -s -m worldbit_fiscal chrome-policy add --origin $Origin
@@ -118,4 +160,5 @@ Write-Host ''
 Write-Host "Instalat. Agentul răspunde la $adresa"
 Write-Host "agent_id: $($sanatos.agent_id)"
 Write-Host "Setări: http://127.0.0.1:$Port/setari"
+if ($Pos -ne 'none') { Write-Host "POS: completează portul COM și restul setărilor în /setari (butonul „Detectează porturi”)." }
 Write-Host "Chrome și Edge: originea $Origin a fost aprobată prin politică. Repornește browserul complet (verifică în chrome://policy sau edge://policy)."

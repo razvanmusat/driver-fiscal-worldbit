@@ -108,6 +108,8 @@ Modul USB-serial (ex. Prolific PL2303 pe COM3): agentul scrie comanda pe port ca
 
 ## Protecția la bon dublu: `external_id` și `payment_key`
 
+- Cheia trimisă la FisCool (`Idempotency-Key`): `external_id` la prima încercare. Reluarea după un răspuns de EROARE al FisCool primește cheie nouă (`<id>-2`, ...), pentru că FisCool memorează eroarea pe cheie. Reluarea unei încercări rămase FĂRĂ răspuns (răspuns pierdut, termen de 30 s depășit, agent repornit) păstrează aceeași cheie: dacă bonul a ieșit totuși, FisCool nu îl tipărește a doua oară. Doar la FisCool; Fisco rămâne cu cheie nouă la fiecare reluare.
+
 - `external_id` identifică un JOB. Același `external_id` cu același conținut = același job (200, fără retipărire); cu alt conținut sau alt `payment_key` = 400.
 - `payment_key` identifică PLATA. Aplicația îl păstrează între joburile aceluiași bon cât timp nu e dovedit că bonul NU a ieșit (anulare automată
   când agentul părea pierdut, fereastră închisă). Un job nou (`external_id` nou) cu un `payment_key` pe care agentul îl cunoaște **nu mai tipărește**:
@@ -159,16 +161,95 @@ Orice a spus driverul ajunge neschimbat în `error` / `result` și de acolo în 
   - Un cod care nu e în documentație trece oricum cu tot ce a spus driverul (fără nume/descriere/rezolvare).
 - **Stare casă (health):** aceleași câmpuri, ca să se vadă și motivul pentru care nu e pregătită.
 
+## POS bancar: Newland N910 Pro, protocol ECR Hypercom (T7/FIP11 v1.06)
+
+Se alege în `/setari`, secțiunea „POS bancar” (grupul „Raiffeisen”, model „ECR Hypercom (Newland N910 Pro)”), și se scrie de mână portul serial al terminalului
+(Windows: `COM4`, numărul din Manager dispozitive după ce driverul USB îl vede și interfața e activată pe terminal; Linux: `/dev/ttyACM0` sau `/dev/ttyUSB0`). Implicit, din document: 9600 baud, 7 biți,
+paritate pară, 1 stop; 30 s pentru pornirea plății, 120 s pentru card și PIN, 1,5 s înainte de confirmarea rezultatului. Butonul „Verifică portul POS”
+deschide și închide portul, fără să trimită nimic. Fără POS configurat (`none`) agentul nu apelează terminalul.
+
+Plata cu cardul sau mixtă: POS ÎNAINTEA bonului fiscal, pe suma de card.
+1. `MOL10.<suma pe 12 cifre>` -> ACK -> `MOL11.` (terminalul a pornit) -> ACK -> `MOL12.` (rezultatul) -> ACK -> (pauză) `MOL13.` -> ACK.
+2. Fără ACK la 10 (după 3 retrimiteri) sau fără 11 în 30 s: terminalul e offline, nimic nu a pornit => eșec sigur (`POS_OFFLINE`), plata se poate relua.
+3. 11 primit, dar fără 12 în timpul de plată (sau conexiunea cade după ce comanda a plecat): protocolul nu are interogare de stare, deci plata se consideră
+   **neîncasată**: eșec cu „Reîncearcă plata” (`POS_NO_RESULT`, `retry_safe`), fără nicio decizie pentru casier. Mesajul de eroare îi spune doar să nu reia
+   plata dacă clientul a fost debitat. Plata nu se retrimite niciodată singură; reluarea o face casierul. Rămâne riscul „încasat, dar fără rezultat” (POS-ul
+   a încasat și cablul a căzut chiar atunci), același ca la o cădere de curent.
+4. 12 cu cod `00`: aprobat. Aprobarea (număr factură, cod aprobare, card mascat) se salvează în baza agentului ÎNAINTE de ACK-ul către POS; apoi bonul
+   fiscal. 13 e „best effort”: plata rămâne aprobată și dacă 13 nu e confirmat.
+5. 12 cu alt cod: respins (`POS_DECLINED`, mesaj în română pentru codurile uzuale), nu iese bon, plata se poate relua.
+6. Mesajele care nu sunt ale noastre (FIP-11 trimite tot traficul și către PIN pad) se ignoră, fără ACK/NAK; cele ale noastre cu LRC greșit primesc NAK.
+7. Reluarea după un bon fiscal eșuat nu cere POS-ul din nou (`pos.status == approved`); după o cădere a agentului cu aprobarea deja salvată,
+   lămurirea trece direct la „reîncearcă tipărirea”, fără POS.
+**Decontarea:** după un raport Z tipărit cu succes, agentul trimite `STL` la POS (o singură dată pe job), exact ca „Decontare” apăsată pe terminal:
+`STL10.` -> ACK -> `STL11.` -> ACK (fără mesajul 12). Rezultatul e pe slip-ul terminalului. Fără setări și fără mesaje în Dressbit: dacă nu iese,
+se dă manual de pe terminal; nu blochează niciodată raportul Z. Nu se trimite după raport X, după bon sau când POS-ul nu e configurat.
+**Anularea plății la POS (`VOI`), doar când bonul fiscal nu poate ieși:** `POST /jobs/<id>/pos-void`. Merge doar pentru un job `failed` cu plata `approved`
+(niciodată pentru un bon tipărit, o plată respinsă, una deja anulată sau cât rulează altă operațiune). Conversația e cea a plății, cu `VOI` în loc de `MOL` și
+numărul chitanței POS (cel de la plată, `transaction_id`) pe 12 cifre în câmpul sumei. Cu succes: `pos.status = voided` (salvat înainte de ACK), jobul rămâne `failed`;
+reluarea ulterioară cere din nou POS-ul (plata nu mai e aprobată). Altfel: 502 cu motivul și „Anulează chitanța nr. X direct de pe POS”; plata rămâne `approved`.
+În Dressbit, în fereastra de eșec cu cardul încasat, „Închide” e înlocuit de „Anulează chitanța POS”; la succes plata se închide, iar dacă anularea nu merge apare mesajul
+cu numărul chitanței și revine „Închide” (ca fereastra să nu blocheze magazinul). Formatul câmpului numărului de chitanță NU e verificat pe terminal.
+PAN-ul complet și data de expirare nu se păstrează nicăieri; RRN nu există în acest protocol (`transaction_id` = numărul facturii).
+
+## Detectarea porturilor și pagina de setări
+
+În `/setari`, lângă portul POS-ului și al sertarului, **„Detectează porturi”** arată echipamentele seriale conectate (nume, producător, USB id) și salvează la click calea cea mai stabilă
+(`worldbit_fiscal/ports.py`):
+- **Linux:** `/dev/serial/by-id/usb-<producător>_<model>_<serie>-if00`, creată de sistem din numărul de serie al echipamentului, deci rămâne aceeași indiferent în ce port USB îl muți
+  (`/dev/ttyACM0` / `/dev/ttyUSB0` se numerotează în ordinea conectării și se pot schimba). Dacă echipamentul nu are nicio cale stabilă, apare avertisment și o regulă udev sugerată
+  (se pune ca root în `/etc/udev/rules.d/`, creează `/dev/pos`). Un echipament fără număr de serie are tot cale fixă, dar două la fel nu se pot deosebi.
+- **Windows:** `COMn` cu numele dispozitivului. Windows ține numărul COM legat de echipament doar dacă acesta are număr de serie USB; fără el, numărul urmărește portul USB (avertisment afișat).
+Pagina de setări e HTML simplu, fără resurse externe: card-uri, bară de stare sus (casa de marcat, POS), bară de salvare fixă, mod întunecat, potrivită și pe telefon.
+
+## Curățarea bazei de joburi
+
+Joburile TERMINATE (tipărite, eșuate, oglinzi) mai vechi de `retention_days` (implicit 7, în `config.json`) se șterg din baza agentului la pornire și apoi la fiecare 6 ore.
+Nu se șterge niciodată un job în lucru sau incert, nici unul de care depinde o oglindă mai nouă. Dressbit își păstrează singur istoricul; agentul are nevoie doar de
+ce îl ajută să recunoască o plată reluată.
+
+## Versiuni și actualizare
+
+- **Versiunea** e în `worldbit_fiscal/version.py` (`MAJOR.MINOR.PATCH`) și apare în `/health` și în `/setari`. `1.0.x` = corecții în agent, `1.x.0` = driver fiscal sau
+  POS nou, `x.0.0` = schimbare de structură. Începem cu `1.0.0`.
+- **Butonul „Actualizează”** din `/setari` (doar la apăsare, niciodată automat) descarcă ultima versiune din repo-ul public de pe GitHub
+  (`main`; adresa se poate schimba în `config.json`, cheia `update_url`) și o instalează **doar dacă are modificări pentru ce rulează pe acest calculator**:
+  miezul agentului + fișierele driverului fiscal ales + fișierele modelului de POS ales (`files` din clasele lor). Nu contează versiunea, listele de
+  înregistrare (`drivers/__init__.py`, `pos/__init__.py`) și driverele/modelele neinstalate aici: dacă doar ele s-au schimbat, mesajul e „Nimic de actualizat”.
+- **Ca o versiune să ajungă la calculatoare:** crești numărul în `version.py` și faci push pe `main`. Fără creșterea numărului, butonul spune că ai deja ultima versiune.
+- **Verificarea înainte de instalare:** pachetul nou se compilează și se importă într-un proces separat, cu același Python ca agentul, ÎNAINTE de orice oprire. O eroare de sintaxă
+  sau un modul lipsă se refuză pe loc, cu fișierul, linia și motivul, iar agentul care rulează nu e atins (fără pauză, fără revenire).
+- **Copie de siguranță:** înainte de schimbare, `config.json` și `jobs.sqlite3` se copiază în `backup\<versiune>-<data>\` (ultimele 3 rămân); la revenire se pun înapoi.
+- **Dacă versiunea nouă trece verificarea, dar pornește greșit:** scriptul o pornește în prim-plan 8 secunde (agentul fiind oprit), citește ce scrie (excepția completă), apoi revine și
+  scrie motivul în `update\result.json` și `last.txt`; fereastra din `/setari` îl afișează (`GET /setari/update-status`). Așteptarea e de 40 s reale.
+- **Instalarea** (doar pe instalarea normală de pe Windows): agentul pregătește pachetul nou, apoi un al doilea task programat oprește agentul, schimbă dosarul
+  `worldbit_fiscal` (cel vechi rămâne în `worldbit_fiscal.bak`), repornește agentul și așteaptă să răspundă în `/health` cu versiunea nouă; dacă nu răspunde în
+  40 s, pune înapoi versiunea veche. Rezultatul ultimei actualizări apare în `/setari`. În pagină, butonul deschide o **fereastră de progres** (verificare și descărcare, instalare și repornire, gata), care urmărește `/health` până agentul revine cu versiunea nouă și apoi reîncarcă pagina singură; dacă versiunea nouă nu pornește, spune asta (agentul a revenit la cea veche). Sesiunea de admin se păstrează peste repornire (`sessions.json`, în dosarul de date). Nu pornește dacă sunt operațiuni fiscale în curs. Configurația și baza de
+  joburi nu se ating. Pe Linux/macOS butonul doar anunță dacă există ceva de actualizat; instalarea se face reinstalând.
+- **Când adaugi un driver fiscal sau un model de POS:** fișier nou în `drivers/` sau `pos/`, `files` completat în clasă, înregistrarea în `drivers/__init__.py` sau
+  `pos/__init__.py`, versiune `1.x.0`. Calculatoarele care nu folosesc acel driver/model nu sunt afectate (butonul le spune „nimic de actualizat”).
+- Lista POS din `/setari` e grupată pe bancă (aplicația băncii din terminal stabilește protocolul, nu marca terminalului); în paranteză sunt terminalele pe care
+  protocolul a fost verificat.
+- Integritatea: descărcarea e prin HTTPS de pe GitHub; cine controlează contul GitHub controlează ce se instalează la apăsarea butonului. Autentificare în două
+  trepte pe cont. Semnarea release-urilor (cheia publică în agent) e o îmbunătățire posibilă.
+
+## Verificat cap-coadă (Windows 11 în VM, Chrome 156)
+
+Pagina HTTPS (adresă privată, certificat de test) cu **clientul real din Dressbit** (`agent.ts`) -> agent instalat ca serviciu -> port COM virtual (com0com, COM50 <-> COM51)
+-> POS fals (acesta pe COM51) și FisCool cu casa simulată: numerar, plată mixtă, card respins, POS fără rezultat, POS oprit, încasat dar casa fără hârtie (anulare reușită,
+anulare refuzată de terminal, a doua anulare refuzată), reîncercare după hârtie fără a cere din nou POS-ul, decontare la Z. Pe Linux, aceleași scenarii prin backend-ul
+Dressbit real (`FiscalAgentEndToEndTest`, port virtual pty). Chrome acceptă apelul către `127.0.0.1:4747` cu politica instalată; răspunsul la verificarea „Private Network
+Access” (`Access-Control-Allow-Private-Network`) e adăugat în agent pentru originile permise. NU s-a putut reproduce cazul „site public pe internet” (fără un tunel public).
+
 ## NEVERIFICAT / ÎN AȘTEPTARE
 
 - **FisCool**: dacă memorează și ERORILE pe cheia de idempotență (dacă da, o reîncercare pe aceeași cheie după o eroare tranzitorie
   întoarce aceeași eroare; atunci operatorul reîncearcă cu confirmare, pe cheie nouă); dacă pornește singur după boot și se conectează
   la casă fără click (manualul spune doar că poate rula în fundal și pornește automat din Setări). Se confirmă pe un aparat real (14 zile gratuite).
-- **POS**: nu există niciun modul în agent. FisCool poate face singur POS-ul: dacă la dispozitiv e activ `auto_send_card_to_pos`, suma cardului
-  se trimite către POS-ul asociat înaintea bonului (răspunsul bonului NU conține RRN/cod autorizare); există și operația `sale` (cu
-  `transaction_id`, `authorization_code`) și `void`. Un modul de POS din agent peste `sale` ar trebui să refuze să ruleze când
-  `auto_send_card_to_pos` e activ (risc de dublă debitare). Neimplementat: așteaptă decizia și testul pe aparat. Anularea unei plăți POS
-  aprobate dacă bonul se abandonează nu e implementată.
+- **POS (decontare, anulare, mesaje nedocumentate)**: documentul ECR nu definește cum răspunde terminalul la „Cancel”, nici tabelul codurilor de
+  răspuns (trimite la ISO-8583). Parametrii seriali prin USB (documentul descrie RS-232 la 9600, 7E1) și comportamentul la „Cancel” se
+  stabilesc pe terminalul real. Anularea plății (`VOI`) există DOAR pentru cazul „POS a încasat, bonul fiscal nu iese” (vezi mai jos). Decontarea (`STL`) la Z e scrisă după document, netestată pe terminal.
+
 - **Chrome**: promptul/politica Local Network Access și valoarea `targetAddressSpace` se testează pe un Chrome real, cu pagină HTTPS
   publică; frontend-ul nu folosește acum `targetAddressSpace`.
 

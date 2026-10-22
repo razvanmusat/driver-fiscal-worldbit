@@ -1,5 +1,7 @@
 import http.client
 import json
+import os
+import shutil
 import tempfile
 import threading
 import time
@@ -128,6 +130,19 @@ class ServerTest(unittest.TestCase):
         status, hdrs, _ = self.call("GET", "/nu-exista")
         self.assertEqual(hdrs["Connection"], "close")
 
+    def test_preflight_answers_the_private_network_request_only_for_allowed_origins(self):
+        pna = {"Origin": ORIGIN, "Access-Control-Request-Method": "POST", "Access-Control-Request-Private-Network": "true"}
+        status, hdrs, _ = self.call("OPTIONS", "/print", headers=pna)
+        self.assertEqual(status, 204)
+        self.assertEqual(hdrs["Access-Control-Allow-Private-Network"], "true")
+        self.assertEqual(hdrs["Access-Control-Allow-Origin"], ORIGIN)
+        status, hdrs, _ = self.call("OPTIONS", "/print", headers={k: v for k, v in pna.items() if k != "Access-Control-Request-Private-Network"})
+        self.assertEqual(status, 204)
+        self.assertNotIn("Access-Control-Allow-Private-Network", hdrs)             # nu se anunță când nu e cerut
+        status, hdrs, _ = self.call("OPTIONS", "/print", headers={**pna, "Origin": "https://strain.test"})
+        self.assertEqual(status, 403)
+        self.assertNotIn("Access-Control-Allow-Private-Network", hdrs)             # o origine nepermisă nu primește nimic
+
     def test_health(self):
         status, _, data = self.api("GET", "/health")
         self.assertEqual(status, 200)
@@ -221,6 +236,105 @@ class ServerTest(unittest.TestCase):
             status, _, _ = self.setari_post("/setari/save", {"port": "4747"}, cookie, origin)
             with self.subTest(origin):
                 self.assertEqual(status, 403)
+
+    def test_update_button_reports_without_installing_when_nothing_changed(self):
+        from tests.test_update import make_release
+        from worldbit_fiscal.version import __version__
+        cookie = self.login()
+        _, _, page = self.call("GET", "/setari", headers={"Cookie": cookie})
+        self.assertIn(f"Versiune agent: {__version__}", page)
+        self.assertIn(">Actualizează</button>", page)
+        zip_path, _ = make_release(version=__version__)
+        self.app.cfg["update_url"] = zip_path.as_uri()
+        status, _, page = self.setari_post("/setari/update", {}, cookie)
+        self.assertEqual(status, 200)
+        self.assertIn("Ai deja ultima versiune", page)
+        zip_path, _ = make_release(version="9.0.0", edits=["drivers/fiscool.py"])      # driverul fiscool nu e cel instalat aici (fisco)
+        self.app.cfg["update_url"] = zip_path.as_uri()
+        status, _, page = self.setari_post("/setari/update", {}, cookie)
+        self.assertIn("Nimic de actualizat", page)
+        status, _, _ = self.setari_post("/setari/update", {})                           # fără autentificare
+        self.assertEqual(status, 401)
+
+    def test_the_port_list_requires_login_and_returns_what_was_detected(self):
+        from unittest import mock
+        from worldbit_fiscal import ports
+        status, _, _ = self.call("GET", "/setari/ports")
+        self.assertEqual(status, 401)
+        cookie = self.login()
+        gasite = [{"path": "/dev/serial/by-id/usb-X-if00", "label": "X", "detail": "d", "stable": True, "note": "", "udev_rule": ""}]
+        with mock.patch.object(ports, "list_ports", lambda: gasite):
+            status, _, data = self.call("GET", "/setari/ports", headers={"Cookie": cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)["ports"], gasite)
+
+    def test_the_settings_page_offers_port_detection_for_the_pos_and_the_drawer(self):
+        cookie = self.login()
+        _, _, page = self.call("GET", "/setari", headers={"Cookie": cookie})
+        self.assertIn("data-target='p_hypercom_ecr_port'", page)
+        self.assertIn("data-target='drawer_port'", page)
+        self.assertIn("id='chip-casa'", page)
+        self.assertIn("<dialog id='port-modal'>", page)          # lista de echipamente se alege într-o fereastră separată, nu în pagină
+        self.assertNotIn("class='ports'", page)
+        self.assertNotIn("<script src", page)                  # fără resurse externe: pagina merge și fără internet
+
+    def test_update_endpoint_returns_json_for_the_progress_window_and_text_page_otherwise(self):
+        from tests.test_update import make_release
+        from worldbit_fiscal.version import __version__
+        cookie = self.login()
+        zip_path, _ = make_release(version=__version__)
+        self.app.cfg["update_url"] = zip_path.as_uri()
+        status, hdrs, body = self.call("POST", "/setari/update", "", {"Cookie": cookie, "Accept": "application/json"})
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", hdrs["Content-Type"])
+        self.assertEqual(json.loads(body)["state"], "current")
+        status, hdrs, body = self.call("POST", "/setari/update", "", {"Cookie": cookie})
+        self.assertIn("text/html", hdrs["Content-Type"])
+        self.assertIn("Ai deja ultima versiune", body)
+
+    def test_update_status_requires_login_and_returns_the_last_result_and_log(self):
+        status, _, _ = self.call("GET", "/setari/update-status")
+        self.assertEqual(status, 401)
+        cookie = self.login()
+        upd = os.path.join(self.home, "update")
+        os.makedirs(upd)
+        with open(os.path.join(upd, "result.json"), "w", encoding="utf-8") as f:
+            json.dump({"ok": False, "from": "1.0.1", "to": "1.0.2", "reason": "RuntimeError: configurare incompatibila"}, f)
+        with open(os.path.join(upd, "last.txt"), "w", encoding="utf-8") as f:
+            f.write("EȘEC: versiunea 1.0.2 nu a răspuns")
+        status, _, body = self.call("GET", "/setari/update-status", headers={"Cookie": cookie})
+        data = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(data["result"]["reason"], "RuntimeError: configurare incompatibila")
+        self.assertIn("nu a răspuns", data["log"])
+
+    @unittest.skipUnless(shutil.which("node"), "node lipsește: sintaxa JavaScript din pagină nu se poate verifica")
+    def test_the_javascript_in_the_settings_page_is_syntactically_valid(self):
+        """Un singur caracter greșit în scriptul din pagină (ex. un rând nou într-un șir) îl strică pe tot: butoanele nu mai fac nimic."""
+        import re
+        import subprocess
+        cookie = self.login()
+        _, _, page = self.call("GET", "/setari", headers={"Cookie": cookie})
+        scripturi = re.findall(r"<script>(.*?)</script>", page, re.S)
+        self.assertTrue(scripturi)
+        fisier = os.path.join(self.home, "pagina.js")
+        with open(fisier, "w", encoding="utf-8") as f:
+            f.write("\n".join(scripturi))
+        r = subprocess.run(["node", "--check", fisier], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_login_survives_an_agent_restart(self):
+        cookie = self.login()
+        # agentul repornește (de exemplu la actualizare): aceeași dată, sesiuni noi încărcate din fișier
+        self.app.sessions = auth.Sessions(os.path.join(self.home, "sessions.json"))
+        status, _, page = self.call("GET", "/setari", headers={"Cookie": cookie})
+        self.assertEqual(status, 200)
+        self.assertNotIn("Autentificare", page)
+
+    def test_health_reports_the_version(self):
+        from worldbit_fiscal.version import __version__
+        _, _, data = self.api("GET", "/health")
+        self.assertEqual(data["version"], __version__)
 
     def test_setari_test_button_and_password_change(self):
         cookie = self.login()

@@ -44,6 +44,7 @@ def _extra(cod, mesaj, raspuns):
 
 class FiscoDriver(FiscalDriver):
     name = "fisco"
+    files = ("drivers/fisco.py", "drivers/catalog_fisco.py")
     fields = (
         Field("base_url", "Adresa Fisco", "text", "http://127.0.0.1:4040"),
         Field("vat_map", "Înlocuire TVA (opțional)", "map", {},

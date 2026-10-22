@@ -31,9 +31,11 @@ class JobHandle:
 
     @property
     def key(self):
-        """Cheia trimisă aparatului: prima încercare = external_id; reîncercările au sufix (altfel un
-        external_id deja eșuat ar putea întoarce rezultatul vechi)."""
-        return self.external_id if self.attempt == 1 else f"{self.external_id}-{self.attempt}"
+        """Cheia trimisă aparatului: prima încercare = external_id; reîncercările au sufix (FisCool memorează și ERORILE pe cheie,
+        deci după un răspuns de eroare aceeași cheie ar întoarce aceeași eroare). Excepție: reluarea unei încercări rămase FĂRĂ
+        răspuns păstrează cheia (`key_attempt`), ca driverul să recunoască bonul care a ieșit totuși, în loc să-l tipărească din nou."""
+        n = self.state.get("key_attempt", self.attempt)
+        return self.external_id if n == 1 else f"{self.external_id}-{n}"
 
     def save(self):
         self._store.update(self.external_id, state=self.state)
@@ -128,10 +130,58 @@ class Runner:
         retry_safe = row["status"] == "failed" and bool((row["error"] or {}).get("retry_safe"))
         if not retry_safe and not confirm_not_printed:
             return row, "CONFIRMATION_REQUIRED"
+        # Încercare rămasă fără niciun răspuns de la driver (răspuns pierdut, termen depășit, agent repornit): nu se știe dacă bonul a ieșit,
+        # deci se reia cu ACEEAȘI cheie. După un răspuns de eroare al driverului (sigur netipărit): cheie nouă.
+        pastreaza_cheia = getattr(self.fiscal, "same_key_after_unknown", False) and self._fara_raspuns(row)
+        stare = {"key_attempt": row["state"].get("key_attempt", row["attempt"])} if pastreaza_cheia else {}
         self.store.update(external_id, status="received", attempt=row["attempt"] + 1, fiscal_job_id=None,
-                          state={}, error=None, result=None, last_resolve=0, started_at=time.time())
+                          state=stare, error=None, result=None, last_resolve=0, started_at=time.time())
         self._start(external_id)
         return self.store.get(external_id), None
+
+    @staticmethod
+    def _fara_raspuns(row):
+        """Ultima încercare a rămas fără răspuns de la driver: job incert, sau abandonat la termen (`NOT_CONFIRMED`) din cauza unei erori
+        care nu venea de la driver. Un răspuns de eroare al driverului (are `driver_code`) înseamnă că a răspuns."""
+        eroare = row["error"] or {}
+        if row["status"] == "failed" and eroare.get("code") == "NOT_CONFIRMED":
+            eroare = eroare.get("ultima_eroare") or {}
+        elif row["status"] != "uncertain":
+            return False
+        return "driver_code" not in eroare
+
+    def void_pos(self, external_id):
+        """Anulează la POS plata aprobată a unui bon care nu a putut ieși (hârtie lipsă, casă blocată). DOAR pentru un job eșuat cu plata aprobată: un bon
+        tipărit sau o plată neaprobată nu se anulează niciodată. Întoarce (rând, problemă, eroare); problemă = NOT_FOUND | NOT_VOIDABLE | BUSY | VOID_FAILED."""
+        row = self.store.get(external_id)
+        if row is None:
+            return None, "NOT_FOUND", None
+        if row["status"] == "alias":      # jobul-oglindă: plata e a jobului care o execută
+            return self.void_pos(row["state"]["alias_of"])
+        if not self._voidable(row):
+            return row, "NOT_VOIDABLE", None
+        if not self.send_lock.acquire(blocking=False):
+            return row, "BUSY", None
+        try:
+            row = self.store.get(external_id)         # recitit sub lacăt: starea s-a putut schimba între timp
+            if not self._voidable(row):
+                return row, "NOT_VOIDABLE", None
+            job = JobHandle(self.store, row)
+            try:
+                self.pos.void(job.pos["transaction_id"], job)
+            except DriverError as e:
+                return self.store.get(external_id), "VOID_FAILED", e
+            except Exception as e:
+                log.exception("eroare internă la anularea plății POS a jobului %s", external_id)
+                return self.store.get(external_id), "VOID_FAILED", DriverError(f"Eroare internă: {e}", code="INTERNAL")
+            return self.store.get(external_id), None, None
+        finally:
+            self.send_lock.release()
+
+    def _voidable(self, row):
+        pos = row["pos"] or {}
+        return (self.pos is not None and row["kind"] == "receipt" and row["status"] == "failed"
+                and pos.get("status") == "approved" and bool(pos.get("transaction_id")))
 
     def _termen(self, row):
         """Cât timp (secunde) se așteaptă confirmarea unui job, de la pornirea lui."""
@@ -254,6 +304,8 @@ class Runner:
         job.save()
         result = pos.sale(receipt.card_total, job)
         job.set_pos(result.to_dict())
+        # termenul de așteptare al bonului fiscal se numără de la aprobarea plății, nu de la începutul jobului (clientul poate sta zeci de secunde la PIN)
+        self.store.update(job.external_id, started_at=time.time())
         job.state.pop("stage", None)
         job.save()
 
@@ -274,11 +326,20 @@ class Runner:
             self._fail(job, Uncertain(f"Eroare internă: {e}", code="INTERNAL"))
 
     def _resolve_pos(self, job):
-        """Plata cu cardul a rămas incertă: nu se retrimite NICIODATĂ cererea de plată până nu se lămurește."""
-        if self.pos is None:
-            raise Uncertain("Plata cu cardul a rămas incertă și POS-ul nu mai e configurat", code="POS_UNCERTAIN")
-        result = self.pos.resolve(job)            # PosDeclined / Uncertain se propagă către _resolve
-        job.set_pos(result.to_dict())
+        """Plata cu cardul a rămas fără rezultat (de obicei agentul a fost repornit în timpul ei). Cererea de plată NU se retrimite niciodată singură. Dacă POS-ul
+        nu poate confirma nimic, plata se consideră neîncasată: eșec cu „Reîncearcă plata" (aceeași regulă ca la „POS fără rezultat"), ca fereastra din Dressbit să nu
+        aștepte la nesfârșit."""
+        if not (job.pos and job.pos.get("status") == "approved"):   # driverul salvează aprobarea înainte de a o confirma POS-ului
+            try:
+                if self.pos is None:
+                    raise Uncertain("POS-ul nu mai e configurat", code="POS_UNCERTAIN")
+                result = self.pos.resolve(job)    # PosDeclined se propagă către _resolve
+            except Uncertain:
+                job.state.pop("stage", None)
+                job.save()
+                raise DriverError("POS-ul nu a trimis rezultatul plății (agentul a fost repornit în timpul plății). Dacă clientul a fost debitat, nu relua plata.",
+                                  code="POS_NO_RESULT", retry_safe=True)
+            job.set_pos(result.to_dict())
         job.state.pop("stage", None)
         job.save()
         # Plata e confirmată, bonul NU s-a tipărit încă: reîncercarea sare peste POS și tipărește.
@@ -288,6 +349,21 @@ class Runner:
     def _printed(self, job, result):
         self.store.update(job.external_id, status="printed", result=result.to_dict(), error=None)
         self._deschide_sertarul(job)
+        self._deconteaza_pos(job)
+
+    def _deconteaza_pos(self, job):
+        """Raportul Z tipărit cu succes -> decontarea la POS (STL), o dată pe job. Best effort: dacă nu iese, se dă manual de pe terminal."""
+        try:
+            if job.kind != "report" or job.report_type() != "Z" or self.pos is None:
+                return
+            stare = dict(self.store.get(job.external_id)["state"] or {})
+            if stare.get("decontare"):
+                return   # deja trimisă pentru acest job
+            stare["decontare"] = True
+            self.store.update(job.external_id, state=stare)
+            self.pos.settlement()
+        except Exception:
+            log.exception("decontarea la POS a eșuat pentru %s", job.external_id)
 
     def _deschide_sertarul(self, job):
         """Bon tipărit cu numerar (și la plata mixtă) -> sertarul se deschide singur, o dată pe job. Best effort: o problemă cu sertarul NU strică bonul."""

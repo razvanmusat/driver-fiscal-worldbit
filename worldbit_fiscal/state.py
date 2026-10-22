@@ -103,6 +103,22 @@ class Store:
                 "SELECT * FROM jobs WHERE status IN ('received', 'running')").fetchall()
         return [self._decode(r) for r in rows]
 
+    def purge(self, max_age_s):
+        """Șterge joburile TERMINATE (tipărite, eșuate, oglinzi) mai vechi de `max_age_s`. Nu atinge niciodată un job în lucru sau incert, nici un job
+        la care trimite o oglindă mai nouă (altfel oglinda ar rămâne fără jobul care execută plata). Întoarce câte rânduri a șters."""
+        limita = time.time() - max_age_s
+        with self._lock:
+            referite = {json.loads(r["state"] or "{}").get("alias_of") for r in self._db.execute(
+                "SELECT state FROM jobs WHERE status = 'alias' AND updated_at >= ?", (limita,))}
+            vechi = [r["external_id"] for r in self._db.execute(
+                "SELECT external_id FROM jobs WHERE status IN ('printed', 'failed', 'alias') AND updated_at < ?", (limita,))
+                if r["external_id"] not in referite]
+            for i in range(0, len(vechi), 500):
+                grup = vechi[i:i + 500]
+                self._db.execute(f"DELETE FROM jobs WHERE external_id IN ({','.join('?' * len(grup))})", grup)
+            self._db.commit()
+        return len(vechi)
+
     def close(self):
         with self._lock:
             self._db.close()
