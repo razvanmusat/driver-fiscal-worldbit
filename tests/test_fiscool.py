@@ -142,6 +142,22 @@ class FiscoolDriverTest(unittest.TestCase):
         self.assertIn(FakeFiscool.DEVICE, text)
         self.assertIn(FakeFiscool.SERIAL, text)
 
+    def test_vat_groups_come_from_the_device_rates(self):
+        self.assertEqual(self.runner.fiscal.vat_groups(), [
+            {"letter": "A", "percent": "21"}, {"letter": "B", "percent": "11"}, {"letter": "C", "percent": "0"}])
+        self.fiscool.vat_rates = {"A": 950}
+        self.assertEqual(self.runner.fiscal.vat_groups(), [{"letter": "A", "percent": "9.5"}])
+
+    def test_vat_groups_explain_what_is_missing(self):
+        self.fiscool.vat_rates = None
+        with self.assertRaisesRegex(ValueError, "nu a întors grupele"):
+            self.runner.fiscal.vat_groups()
+        self.fiscool.device_listed = False
+        with self.assertRaisesRegex(ValueError, "nu apare în FisCool"):
+            self.runner.fiscal.vat_groups()
+        with self.assertRaisesRegex(ValueError, "nu e setat"):
+            make_runner(fiscool_cfg(self.fiscool.url, device_id="")).fiscal.vat_groups()
+
 
 if __name__ == "__main__":
     unittest.main()

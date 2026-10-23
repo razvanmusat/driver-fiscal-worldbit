@@ -166,6 +166,7 @@ class FakeFiscool(_Server):
         self.error_times = None       # None = mereu; N = doar primele N cereri primesc eroarea, apoi merge
         self.device_status = "Connected"
         self.device_listed = True
+        self.vat_rates = {"A": 2100, "B": 1100, "C": 0}   # forma din documentația API HTTP (litera grupei -> sutimi de procent); nevăzută pe un răspuns real
         self.requests = []            # (Idempotency-Key, corp)
         self.cache = {}
         self.error_cache = {}
@@ -190,6 +191,7 @@ class FakeFiscool(_Server):
                 devices.append({
                     "config": {"id": self.DEVICE, "name": "Casa 1", "enabled": True, "auto_send_card_to_pos": False},
                     "status": self.device_status, "status_text": self.device_status,
+                    "vat_rates": self.vat_rates,
                     "connected_device_id": self.SERIAL if self.device_status == "Connected" else None})
             return self.reply(h, 200, {"fiscal_devices": devices})
         if method == "POST" and h.path == "/devices/operation":

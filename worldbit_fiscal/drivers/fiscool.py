@@ -26,6 +26,8 @@ NEVERIFICAT (documentația nu spune; de confirmat pe un aparat real în perioada
   - POS: dacă la dispozitiv e activ `auto_send_card_to_pos`, FisCool trimite singur suma cardului către POS-ul asociat
     înaintea bonului (documentat). Răspunsul bonului NU conține RRN/cod autorizare.
 """
+from decimal import Decimal
+
 from .. import httpc
 from ..contract import percent_key
 from ..errors import (NotConnected, NothingSent, PosDeclined, PrintFailed, Uncertain)
@@ -114,6 +116,29 @@ class FiscoolDriver(FiscalDriver):
                          f"serie: {d.get('connected_device_id')} | card către POS automat: "
                          f"{cfg.get('auto_send_card_to_pos')}")
         return "\n".join(lines)
+
+    def vat_groups(self):
+        """Pentru /setari: grupele de TVA pe care FisCool le citește de pe aparat (`vat_rates` din GET /devices/fiscal: litera grupei -> cota în sutimi de
+        procent, ex. "A": 1900 = 19%), ca adminul să aleagă una. Întoarce [{"letter": "A", "percent": "19"}, ...]; ridică ValueError cu mesajul pentru admin."""
+        if not self.device_id:
+            raise ValueError("ID-ul dispozitivului fiscal nu e setat: completează-l și salvează setările")
+        try:
+            entry = self._my_device()
+        except httpc.HttpError as e:
+            raise ValueError(f"FisCool nu răspunde: {e}")
+        if entry is None:
+            raise ValueError("Dispozitivul setat nu apare în FisCool")
+        rates = entry.get("vat_rates")
+        if not isinstance(rates, dict) or not rates:
+            raise ValueError("FisCool nu a întors grupele de TVA ale aparatului (casa de marcat e conectată?)")
+        groups = []
+        for letter, value in sorted(rates.items()):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            groups.append({"letter": str(letter), "percent": percent_key(Decimal(str(value)) / 100)})
+        if not groups:
+            raise ValueError("FisCool nu a întors nicio cotă de TVA citibilă")
+        return groups
 
     def _serial(self):
         """Seria hardware, best-effort: nu poate strica un bon deja tipărit."""

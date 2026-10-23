@@ -56,12 +56,12 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(self.state(version="0.9.0", edits=["runner.py"]), "current")
 
     def test_newer_version_without_changes_for_this_machine_is_not_installed(self):
-        self.assertEqual(self.state(version="1.1.0"), "irrelevant")                                  # doar versiunea
-        self.assertEqual(self.state(version="1.1.0", edits=["drivers/fisco.py"]), "irrelevant")      # alt driver fiscal
-        self.assertEqual(self.state(version="1.1.0", edits=["drivers/catalog_fisco.py"]), "irrelevant")
-        self.assertEqual(self.state(version="1.1.0", edits=["pos/hypercom_ecr.py"]), "irrelevant")   # POS neales aici
-        self.assertEqual(self.state(version="1.1.0", edits=["drivers/driver_nou.py", "pos/pos_nou.py"]), "irrelevant")
-        self.assertEqual(self.state(version="1.1.0", edits=["drivers/__init__.py", "pos/__init__.py"]), "irrelevant")   # listele de înregistrare
+        self.assertEqual(self.state(version="8.1.0"), "irrelevant")                                  # doar versiunea
+        self.assertEqual(self.state(version="8.1.0", edits=["drivers/fisco.py"]), "irrelevant")      # alt driver fiscal
+        self.assertEqual(self.state(version="8.1.0", edits=["drivers/catalog_fisco.py"]), "irrelevant")
+        self.assertEqual(self.state(version="8.1.0", edits=["pos/hypercom_ecr.py"]), "irrelevant")   # POS neales aici
+        self.assertEqual(self.state(version="8.1.0", edits=["drivers/driver_nou.py", "pos/pos_nou.py"]), "irrelevant")
+        self.assertEqual(self.state(version="8.1.0", edits=["drivers/__init__.py", "pos/__init__.py"]), "irrelevant")   # listele de înregistrare
 
     def test_change_in_the_installed_driver_or_in_the_core_is_installed(self):
         self.assertEqual(self.state(version=NOUA, edits=["drivers/fiscool.py"]), "update")
@@ -84,9 +84,9 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(self.state(version=NOUA, edits=["drivers/fiscool.py"], cfg=fisco), "irrelevant")
 
     def test_messages_say_what_happens(self):
-        _, pkg = make_release(version="1.1.0")
+        _, pkg = make_release(version="8.1.0")
         self.assertIn("Nimic de actualizat", decision(pkg, self.cfg)[1])
-        self.assertIn("1.1.0", decision(pkg, self.cfg)[1])
+        self.assertIn("8.1.0", decision(pkg, self.cfg)[1])
         _, pkg = make_release(version=NOUA, edits=["runner.py"])
         self.assertEqual(decision(pkg, self.cfg)[1], f"Actualizare disponibilă: {__version__} -> {NOUA}.")
 
@@ -157,7 +157,7 @@ class RunUpdateTest(unittest.TestCase):
         self.assertEqual(self.staged, [])
 
     def test_newer_version_without_changes_for_this_machine_installs_nothing(self):
-        text = self.run_with(version="1.1.0", edits=["drivers/fisco.py"])
+        text = self.run_with(version="8.1.0", edits=["drivers/fisco.py"])
         self.assertIn("Nimic de actualizat", text)
         self.assertEqual(self.staged, [])
 
@@ -211,21 +211,21 @@ class PreflightTest(unittest.TestCase):
 
     def test_a_syntax_error_is_reported_with_the_file_and_the_kind_of_error(self):
         with self.assertRaises(updater.UpdateError) as ctx:
-            updater.preflight(self.pkg(version="1.0.2", replace={"runner.py": "def broken(:\n"}), "1.0.2")
+            updater.preflight(self.pkg(version="8.0.2", replace={"runner.py": "def broken(:\n"}), "8.0.2")
         self.assertIn("nu poate porni", str(ctx.exception))
         self.assertIn("SyntaxError", str(ctx.exception))
         self.assertIn("runner.py", ctx.exception.detail)
 
     def test_an_import_error_is_reported(self):
         with self.assertRaises(updater.UpdateError) as ctx:
-            updater.preflight(self.pkg(version="1.0.2", edits=["server.py"], replace={"setari.py": "import modul_care_nu_exista\n"}), "1.0.2")
+            updater.preflight(self.pkg(version="8.0.2", edits=["server.py"], replace={"setari.py": "import modul_care_nu_exista\n"}), "8.0.2")
         self.assertIn("modul_care_nu_exista", str(ctx.exception))
 
     def test_a_package_that_declares_another_version_is_refused(self):
-        pkg = self.pkg(version="1.0.2")
+        pkg = self.pkg(version="8.0.2")
         with self.assertRaises(updater.UpdateError) as ctx:
-            updater.preflight(pkg, "1.0.9")
-        self.assertIn("declară versiunea 1.0.2", str(ctx.exception))
+            updater.preflight(pkg, "8.0.9")
+        self.assertIn("declară versiunea 8.0.2", str(ctx.exception))
 
     def test_the_service_python_without_console_is_replaced_by_the_console_one(self):
         with mock.patch.object(updater.sys, "executable", r"C:\\Python312\\pythonw.exe"), mock.patch.object(updater.os.path, "exists", lambda p: True):
@@ -255,13 +255,13 @@ class RunUpdateInfoTest(unittest.TestCase):
     def test_every_outcome_has_a_state_a_message_and_the_target_version_only_when_installing(self):
         r = self.info(version=__version__)
         self.assertEqual((r["state"], r["target"]), ("current", None))
-        r = self.info(version="1.1.0", edits=["drivers/fisco.py"])
+        r = self.info(version="8.1.0", edits=["drivers/fisco.py"])
         self.assertEqual((r["state"], r["target"]), ("irrelevant", None))
         r = self.info(version=NOUA, edits=["drivers/fiscool.py"])
         self.assertEqual((r["state"], r["target"]), ("started", NOUA))
         self.assertIn("Instalarea a pornit", r["message"])
         self.runner.store.create("in-curs", "receipt", "{}")
-        r = self.info(version="1.0.2", edits=["runner.py"])
+        r = self.info(version="8.0.2", edits=["runner.py"])
         self.assertEqual((r["state"], r["target"]), ("busy", None))
 
     def test_unavailable_and_error_states(self):
@@ -272,9 +272,9 @@ class RunUpdateInfoTest(unittest.TestCase):
         self.assertEqual(updater.run_update_info(self.cfg, self.runner, self.home)["state"], "error")
 
     def test_a_broken_release_is_refused_with_the_reason_and_never_touches_the_running_agent(self):
-        r = self.info(version="1.0.2", replace={"runner.py": "def broken(:\n"})
+        r = self.info(version="8.0.2", replace={"runner.py": "def broken(:\n"})
         self.assertEqual(r["state"], "error")
-        self.assertIn("Versiunea 1.0.2 nu a fost instalată", r["message"])
+        self.assertIn("Versiunea 8.0.2 nu a fost instalată", r["message"])
         self.assertIn("SyntaxError", r["message"])
         self.assertIn("Agentul actual nu a fost atins", r["message"])
         self.assertIn("runner.py", r["detail"])

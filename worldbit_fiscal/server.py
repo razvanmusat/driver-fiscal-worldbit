@@ -247,11 +247,13 @@ class Handler(BaseHTTPRequestHandler):
     def _setari_get(self, path):
         if not self._guard(True):
             return
-        if path not in ("/setari", "/setari/ports", "/setari/update-status"):
+        if path not in ("/setari", "/setari/ports", "/setari/update-status", "/setari/vat-rates"):
             return self._error(404, "NOT_FOUND", "Cale necunoscută")
-        if path in ("/setari/ports", "/setari/update-status"):
+        if path in ("/setari/ports", "/setari/update-status", "/setari/vat-rates"):
             if not self._authed():
                 return self._error(401, "UNAUTHORIZED", "Autentificare necesară")
+            if path == "/setari/vat-rates":
+                return self._vat_rates()
             if path == "/setari/ports":
                 return self._json(200, {"ports": ports.list_ports()})
             home = self.app.home or config_mod.home_dir()
@@ -259,6 +261,16 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return self._html(200, setari.login_page(configured=bool(self.app.cfg["admin"])))
         self._html(200, self._settings_html())
+
+    def _vat_rates(self):
+        """Grupele de TVA ale casei de marcat (citite de driver), pentru fereastra de alegere din /setari."""
+        vat_groups = getattr(self.app.runner.fiscal, "vat_groups", None)
+        if vat_groups is None:
+            return self._error(404, "NOT_FOUND", "Driverul nu poate citi cotele de TVA ale casei")
+        try:
+            return self._json(200, {"groups": vat_groups()})
+        except ValueError as e:
+            return self._error(502, "VAT_RATES_UNAVAILABLE", str(e))
 
     def _form(self):
         body = self._body()

@@ -50,6 +50,7 @@ label{display:block;font-weight:600;font-size:13.5px;margin:0 0 6px}
 input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--field);color:var(--text);font:inherit;transition:border-color .15s,box-shadow .15s}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-soft)}
 textarea{min-height:92px;font-family:ui-monospace,Consolas,monospace;font-size:13.5px;resize:vertical}
+.mini{display:flex;gap:10px;align-items:center}.mini input{width:130px;flex:none}
 .check{display:flex;gap:10px;align-items:flex-start;font-weight:500;cursor:pointer}.check input{margin-top:4px;accent-color:var(--primary)}
 .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
 .btn{appearance:none;border:1px solid var(--line);background:var(--card);color:var(--text);padding:9px 16px;border-radius:10px;font:inherit;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s}
@@ -128,14 +129,23 @@ def _detect(target):
     return (f"<div class='actions' style='margin-top:10px'><button type='button' class='btn ghost small detect' data-target='{_e(target)}'>Detectează porturi</button></div>")
 
 
+def _vat_button():
+    """Butonul „Interoghează cotele TVA" de lângă câmpul de înlocuire TVA: deschide fereastra cu grupele citite de pe aparat."""
+    return "<button type='button' class='btn ghost small' id='vat-btn'>Interoghează cotele TVA din casă</button>"
+
+
 def _field_html(field, value, prefix="d_", extra=""):
     name = prefix + field.key
+    mini = field.kind == "map" and bool(extra)
     help_ = f"<small class='help'>{_e(field.help)}</small>" if field.help else ""
-    if field.kind == "map":
+    if field.kind == "map" and extra:   # câmp mic (câteva caractere pe linie), cu butonul alături
+        control = f"<div class='mini'><input type='text' name='{name}' id='f_{name}' value='{_e(', '.join(f'{k}={v}' for k, v in value.items()))}' placeholder='21=A'>{extra}</div>"
+        extra = ""
+    elif field.kind == "map":
         control = f"<textarea name='{name}' id='f_{name}'>{_e(_map_text(value))}</textarea>"
     else:
         control = f"<input type='text' name='{name}' value='{_e(value)}' id='f_{name}'>"
-    return f"<div class='field{' wide' if field.kind == 'map' or extra else ''}'><label for='f_{name}'>{_e(field.label)}</label>{control}{help_}{extra}</div>"
+    return f"<div class='field{' wide' if (field.kind == 'map' and not mini) or extra else ''}'><label for='f_{name}'>{_e(field.label)}</label>{control}{help_}{extra}</div>"
 
 
 _JS = """
@@ -190,6 +200,37 @@ _JS = """
   ok.addEventListener('click',function(){var r=q("input[name='port-choice']:checked",lista);if(r&&tinta){tinta.value=r.value}dlg.close()});
   q('#modal-cancel').addEventListener('click',function(){dlg.close()});
   dlg.addEventListener('click',function(e){if(e.target===dlg)dlg.close()});
+  var vb=q('#vat-btn');
+  if(vb){
+    var vd=q('#vat-modal'),vl=q('#vat-list'),vok=q('#vat-ok');
+    function vmesaj(text){vl.textContent='';var e=document.createElement('div');e.className='empty';e.textContent=text;vl.appendChild(e)}
+    vb.addEventListener('click',function(){
+      vok.disabled=true;vmesaj('Se interoghează casa de marcat…');vd.showModal();
+      fetch('/setari/vat-rates',{credentials:'same-origin'}).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j}})}).then(function(x){
+        if(!x.ok){vmesaj((x.j.error&&x.j.error.message)||'Nu s-au putut citi cotele de TVA.');return}
+        vl.textContent='';
+        x.j.groups.forEach(function(g){
+          var l=document.createElement('label');l.className='port';
+          var r=document.createElement('input');r.type='radio';r.name='vat-choice';r.value=g.percent+'='+g.letter;
+          var c=document.createElement('div');var t=document.createElement('b');t.textContent='Grupa '+g.letter+' · '+g.percent+'%';c.appendChild(t);
+          l.appendChild(r);l.appendChild(c);vl.appendChild(l);
+          r.addEventListener('change',function(){vok.disabled=false;qa('.port',vl).forEach(function(y){y.classList.toggle('sel',y.querySelector('input').checked)})});
+        });
+      }).catch(function(){vmesaj('Nu s-au putut citi cotele de TVA.')});
+    });
+    vok.addEventListener('click',function(){
+      var r=q("input[name='vat-choice']:checked",vl);
+      if(r){
+        var camp=q('#f_d_vat_map'),nou=r.value,cota=Number(nou.split('=')[0]),linii=camp.value.split(/[\\n,]/).filter(function(l){return l.trim()!==''}),gasit=false;
+        linii=linii.map(function(l){var k=Number(l.split('=')[0]);if(k===cota){gasit=true;return nou}return l});
+        if(!gasit)linii.push(nou);
+        camp.value=linii.join(', ');
+      }
+      vd.close();
+    });
+    q('#vat-cancel').addEventListener('click',function(){vd.close()});
+    vd.addEventListener('click',function(e){if(e.target===vd)vd.close()});
+  }
   var uf=q('#update-form');
   if(uf){
     var um=q('#update-modal'),ub=q('#u-bar'),umsg=q('#u-msg'),utitle=q('#u-title'),uclose=q('#u-close'),ufoot=q('#u-foot'),udet=q('#u-det'),udetail=q('#u-detail'),terminat=true;
@@ -261,7 +302,8 @@ def settings_page(cfg, driver_cls, driver_values, message=None, error=None, outp
                             "Parametrii de mai jos sunt cei din documentația protocolului și sunt completați corect. "
                             "Nu-i schimba decât dacă banca sau testul pe terminal cere asta.</div></div>")
         pos_fields += f"<div class='pos-model grid' data-model='{_e(m)}' style='margin-top:16px'>{campuri}</div>"
-    driver_fields = "".join(_field_html(f, driver_values[f.key]) for f in driver_cls.fields)
+    driver_fields = "".join(_field_html(f, driver_values[f.key], extra=_vat_button() if f.key == "vat_map" and hasattr(driver_cls, "vat_groups") else "")
+                            for f in driver_cls.fields)
     discover = ("<button type='submit' class='btn' formaction='/setari/devices'>Detectează dispozitive</button>"
                 if hasattr(driver_cls, "discover") else "")
     sertar = drawer_mod.settings(cfg)
@@ -324,6 +366,11 @@ def settings_page(cfg, driver_cls, driver_values, message=None, error=None, outp
 <div class='modal-head'><h3>Alege echipamentul</h3><p>Echipamentele seriale (USB) găsite pe acest calculator. Alege-l pe cel dorit și apasă „Selectează”.</p></div>
 <div class='modal-body' id='modal-list'></div>
 <div class='modal-foot'><button type='button' class='btn' id='modal-cancel'>Anulează</button><button type='button' class='btn primary' id='modal-ok' disabled>Selectează</button></div>
+</dialog>
+<dialog id='vat-modal'>
+<div class='modal-head'><h3>Cote TVA din casa de marcat</h3><p>Grupele de TVA citite de pe aparat (prin driver). Alege grupa pe care o folosești și apasă „Selectează”: se completează în câmpul „Înlocuire TVA” (cota=litera).</p></div>
+<div class='modal-body' id='vat-list'></div>
+<div class='modal-foot'><button type='button' class='btn' id='vat-cancel'>Anulează</button><button type='button' class='btn primary' id='vat-ok' disabled>Selectează</button></div>
 </dialog>
 {_UPDATE_MODAL}
 <script>{_JS}</script>"""
@@ -413,7 +460,7 @@ def _parse_field(f, raw):
 
 def _parse_map(raw):
     result = {}
-    for line in raw.splitlines():
+    for line in raw.replace(",", "\n").splitlines():   # perechi pe linii sau separate prin virgulă
         line = line.strip()
         if not line:
             continue

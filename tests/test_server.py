@@ -278,6 +278,15 @@ class ServerTest(unittest.TestCase):
         self.assertNotIn("class='ports'", page)
         self.assertNotIn("<script src", page)                  # fără resurse externe: pagina merge și fără internet
 
+    def test_vat_rates_endpoint_requires_login_and_fisco_cannot_read_them(self):
+        status, _, _ = self.call("GET", "/setari/vat-rates")
+        self.assertEqual(status, 401)
+        cookie = self.login()
+        status, _, _ = self.call("GET", "/setari/vat-rates", headers={"Cookie": cookie})
+        self.assertEqual(status, 404)                             # driverul Fisco nu are citirea cotelor
+        _, _, page = self.call("GET", "/setari", headers={"Cookie": cookie})
+        self.assertNotIn("id='vat-btn'", page)
+
     def test_update_endpoint_returns_json_for_the_progress_window_and_text_page_otherwise(self):
         from tests.test_update import make_release
         from worldbit_fiscal.version import __version__
@@ -349,3 +358,49 @@ class ServerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FiscoolVatRatesServerTest(unittest.TestCase):
+    def setUp(self):
+        from tests.fakes import FakeFiscool, fiscool_cfg
+        self.fiscool = FakeFiscool().start()
+        self.addCleanup(self.fiscool.stop)
+        self.home = tempfile.mkdtemp()
+        cfg = fiscool_cfg(self.fiscool.url)
+        cfg["admin"] = auth.hash_password("parola-admin-1")
+        self.app = App(cfg, make_runner(cfg), self.home)
+        self.httpd = make_server(self.app, port=0)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+
+    def call(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request(method, path, body=body, headers=headers or {})
+        resp = conn.getresponse()
+        data = resp.read().decode()
+        conn.close()
+        return resp.status, dict(resp.getheaders()), data
+
+    def login(self):
+        status, hdrs, _ = self.call("POST", "/setari/login", urlencode({"password": "parola-admin-1"}),
+                                    {"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(status, 303)
+        return hdrs["Set-Cookie"].split(";")[0]
+
+    def test_the_casa_tab_offers_the_vat_query_and_the_endpoint_returns_the_groups(self):
+        cookie = self.login()
+        _, _, page = self.call("GET", "/setari", headers={"Cookie": cookie})
+        self.assertIn("id='vat-btn'", page)
+        self.assertIn("<dialog id='vat-modal'>", page)
+        status, _, data = self.call("GET", "/setari/vat-rates", headers={"Cookie": cookie})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data)["groups"][0], {"letter": "A", "percent": "21"})
+
+    def test_a_house_without_rates_gets_a_readable_error(self):
+        cookie = self.login()
+        self.fiscool.vat_rates = None
+        status, _, data = self.call("GET", "/setari/vat-rates", headers={"Cookie": cookie})
+        self.assertEqual(status, 502)
+        self.assertIn("grupele de TVA", json.loads(data)["error"]["message"])
